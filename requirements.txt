@@ -1,0 +1,26 @@
+# Core stack for data prep and baseline models
+numpy>=1.26.0
+pandas>=2.2.0
+scikit-learn>=1.5.0
+
+# PyTorch bits for the two-tower ranking stage
+torch>=2.2.0
+
+# TensorFlow setup for the DIN-LKD training stage
+# Apple Silicon build
+tensorflow-macos==2.16.2; platform_system == "Darwin" and platform_machine == "arm64"
+tensorflow-metal==1.2.0; platform_system == "Darwin" and platform_machine == "arm64"
+
+# Intel macOS, Linux, or Windows wheels
+tensorflow==2.16.2; platform_system != "Darwin" or platform_machine != "arm64"
+
+# Keras runtime plus TensorBoard logging
+keras>=3.11.0
+tensorboard>=2.16.0
+
+# Visualization helpers and general utilities
+matplotlib>=3.8.0
+tqdm>=4.66.0
+rich>=13.0.0
+openpyxl>=3.1.2
+pyyaml>=6.0.1
