@@ -273,6 +273,11 @@ Notes:
 - `--format std`
 	- train/test elements: `(user_idx, hist_item_idx_list, hist_cate_list, target_item_idx, target_cate, label)`
 
+**History semantics**
+- By default, only `label == 1` events enter the behavior history; use `--include_nonpositive_history` only for an intentional ablation.
+- Histories are capped by `--max_history_len` (default `50`).
+- Validation examples inherit positive training history for the same user, avoiding a cold restart at the split boundary.
+
 **How `cate_list` and `theme_list` are built**
 - Both are length `n_items` arrays indexed by `item_idx`.
 - If the corresponding column in `item_catalog.csv` is not an integer dtype, the script re-encodes unique values to dense integer IDs.
@@ -464,4 +469,3 @@ The scripts accept explicit paths, so you can adopt a consistent layout like:
 - `runs/<tag>/copy/...`
 
 The essential principle is not the folder names; it is that artifacts that share an index space are versioned and moved together.
-

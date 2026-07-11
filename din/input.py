@@ -34,7 +34,9 @@ class DataInput:
       i.append(t[2])
       y.append(t[3])
       sl.append(len(t[1]))
-    max_sl = max(sl)
+    # Keep a physical padding column even when every sequence in the batch is
+    # empty. The model masks it out using sl=0, avoiding zero-width tensors.
+    max_sl = max(1, max(sl))
 
     hist_i = np.zeros([len(ts), max_sl], np.int64)
 
@@ -77,7 +79,7 @@ class DataInputTest:
       i.append(t[2][0])
       j.append(t[2][1])
       sl.append(len(t[1]))
-    max_sl = max(sl)
+    max_sl = max(1, max(sl))
 
     hist_i = np.zeros([len(ts), max_sl], np.int64)
 

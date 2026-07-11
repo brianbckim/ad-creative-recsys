@@ -129,6 +129,8 @@ Common options
 - `--theme_col`: column in item catalog used as theme feature (string values will be re-encoded into dense IDs)
 - `--format` (default `legacy`, choices `legacy|std`): dataset tuple format
 - `--test_ratio` (default `0.1`)
+- `--max_history_len` (default `50`): cap positive behavior history length
+- `--include_nonpositive_history`: include label-0 events for an explicit ablation; off by default
 - `--out` (default `./din/dataset.pkl`)
 
 ### Stage 5 — DIN listwise KD training
@@ -151,9 +153,13 @@ Common options
 - `--lambda_kd` (default `0.7`): KD loss weight
 - `--lr` (default `5e-4`)
 - `--point_loss_weight` (default `1.0`): weight for DIN’s original pointwise loss component
+- `--eval_k` (default `10,20`): held-out teacher/student Recall/NDCG cutoffs
+- `--checkpoint_metric` (default `student_ndcg`, choices `student_ndcg|total_loss`)
 
 Outputs
-- `din_kd_best.ckpt` written under `--out_dir` (selected by minimum training `total_loss` in this implementation)
+- `din_kd_best.ckpt` written under `--out_dir` (selected by held-out student NDCG by default)
+- `metrics.jsonl` with teacher/student Recall/NDCG, `delta_ndcg`, user-gradient norm, and embedding update magnitude
+- `run_config.json` with architecture version, CLI arguments, and cardinalities
 
 ### Stage 6 — Export DIN embeddings for downstream use
 
@@ -458,7 +464,8 @@ This section maps the repository’s terms to the concrete artifacts and ID spac
 	- `din/dataset.pkl`: pickled dataset payload expected by the TF1 DIN implementation.
 
 - DIN KD
-	- `din_kd_best.ckpt*`: best checkpoint chosen by minimum training `total_loss` in this implementation.
+	- `din_kd_best.ckpt*`: best checkpoint chosen by the configured metric; held-out student NDCG is the default.
+	- `metrics.jsonl`: per-epoch retrieval/reranking and user-embedding health metrics.
 
 - DIN embedding exports
 	- `user_embeddings.csv` / `theme_embeddings.csv` are the default output names from `din/export_user_theme_embeddings.py`.
@@ -482,5 +489,3 @@ This section maps the repository’s terms to the concrete artifacts and ID spac
 - `K`: candidate slate size (Top‑K). This shows up in dumping, KD training, and reranking.
 - `tau` (temperature): softens distributions; higher `tau` makes teacher probabilities less peaky.
 - Copy head: lightweight model that combines (user emb, theme emb, copy emb) to score copy candidates.
-
-

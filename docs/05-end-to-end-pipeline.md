@@ -209,6 +209,7 @@ python make_din_dataset.py \
 	--item_map $RUN_DIR/twotower_data/item_map.csv \
 	--item_catalog $RUN_DIR/twotower_data/item_catalog.csv \
 	--theme_col theme_raw \
+	--max_history_len 50 \
 	--out $RUN_DIR/din/dataset.pkl
 ```
 
@@ -217,6 +218,7 @@ Notes grounded in code:
 	- `train_set`, `test_set`, `cate_list`, `theme_list`, and `(n_users, n_items, cate_count, theme_count)`.
 - The per-user split is chronological if timestamps exist; otherwise it falls back to the (stable) input row order.
 	- If you feed pair CSVs without timestamps, you cannot recover chronology, so the resulting “sequence” only reflects your input ordering.
+- Only positive events enter behavior history by default, and validation examples inherit the user's training history.
 
 ### 2.2 Train listwise KD DIN (`din/train_listwise_kd.py`)
 
@@ -236,6 +238,8 @@ python din/train_listwise_kd.py \
 	--proxy_jsonl $PROXY_DIN \
 	--out_dir $RUN_DIR/din_kd_runs \
 	--K 200 \
+	--eval_k 10,20 \
+	--checkpoint_metric student_ndcg \
 	--seed 42
 ```
 
@@ -243,8 +247,9 @@ Key behavior to keep in mind:
 - This is TF1-style graph/session execution (`tf.compat.v1`, `tf.Session`).
 - The KD distribution is derived by softmax over teacher scores with temperature `tau`:
 	- teacher logits are scaled by `1/tau` before softmax.
-- The “best” checkpoint is saved when training average `total_loss` improves.
-	- It is not selected by a validation metric.
+- Each epoch reports teacher and student Recall/NDCG on held-out slates, plus `delta_ndcg`, `user_grad_norm`, and `user_emb_delta`.
+- The default “best” checkpoint is selected by held-out student NDCG at the first `--eval_k` cutoff.
+- Training aborts if the exported user embedding table is disconnected or does not update.
 
 ### 2.3 Export DIN embeddings to CSV (`din/export_user_theme_embeddings.py`)
 
@@ -445,4 +450,3 @@ At this point, the operational output is:
 If you want a single default pick from this run, start with the row where `rank == 1`.
 
 And you still have the full lineage of artifacts (proxy tables, index maps, teacher slates, DIN checkpoints, embedding tables) needed to reproduce or debug the ranking.
-
