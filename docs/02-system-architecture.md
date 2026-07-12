@@ -73,6 +73,7 @@ Below is the concrete mapping from repo scripts to architectural components.
 
 **Why this exists**
 - The DIN implementation in this repo is a TF1-style graph model expecting a specific pickle payload.
+- Histories use positive behavior events by default. Validation histories are seeded with each user's training history instead of restarting at the validation boundary.
 
 ### E) DIN Listwise KD Trainer (Student)
 **Script:** `din/train_listwise_kd.py`
@@ -85,12 +86,17 @@ Below is the concrete mapping from repo scripts to architectural components.
 	- KD loss (KL divergence) against the teacher distribution,
 	- listwise CE over positives if positives are available,
 	- plus the DIN model’s original pointwise BCE loss (weighted by `--point_loss_weight`).
+- The student uses a gated hybrid user representation: a learned user-ID embedding is fused with target-aware history attention.
+- Listwise scoring computes a separate history-attention vector for every candidate rather than sharing the pointwise target's history vector across the slate.
+- Held-out teacher/student Recall and NDCG are computed on the same candidate slates. The default checkpoint criterion is student `NDCG` at the first `--eval_k` cutoff.
 
 ### F) Embedding Export (DIN → tables for TF2/Keras)
 **Script:** `din/export_user_theme_embeddings.py`
 
 **Responsibility**
 - Exports `user_emb_w` and `theme_emb_w` from the DIN checkpoint into CSV tables with `emb_*` columns.
+
+The exported `user_emb_w` is connected to both the pointwise and listwise objectives. Training aborts if the table receives no gradient or does not update, preventing random initialization from being exported silently.
 
 **Key architectural constraint**
 - The exported `user_id` / `theme_id` in these CSVs are embedding row indices (dense integer IDs), and they must align with the IDs used when building copy-head samples.
@@ -316,9 +322,9 @@ Attribution boundary:
 - **Also implemented in this repo (these files live under `din/`)**:
 	- `din/train_listwise_kd.py` (listwise KD trainer)
 	- `din/export_user_theme_embeddings.py` (embedding export)
-- **Reference-derived code is limited to 2 files under `din/`** (DIN TF1 model implementation; reference: https://github.com/zhougr1993/DeepInterestNetwork):
-	- `din/model.py`
+- **Reference-derived foundation** (reference: https://github.com/zhougr1993/DeepInterestNetwork):
 	- `din/input.py`
+	- `din/model.py` began from the reference structure but now contains project-specific hybrid user fusion, candidate-specific attention, Keras 3-compatible layers, and training invariants.
 
 ```mermaid
 flowchart TD
@@ -439,4 +445,3 @@ The canonical dependency list is in `requirements.txt`. Architecturally:
 
 If you want a single “mental” dependency rule: the pipeline is only as consistent as its index spaces.
 Keep `user_map.csv`, `item_map.csv`, `din/dataset.pkl`, and exported embedding CSVs from the same run/tag together.
-

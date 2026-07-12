@@ -7,7 +7,10 @@ import tensorflow as _tf
 tf = _tf.compat.v1
 tf.disable_v2_behavior()
 
-from model import Model
+try:
+    from .model import MODEL_VERSION, Model
+except ImportError:
+    from model import MODEL_VERSION, Model
 
 
 def export_embeddings(dataset_pkl: str, ckpt: str,
@@ -54,6 +57,7 @@ def export_embeddings(dataset_pkl: str, ckpt: str,
         theme_df.insert(0, "theme_id", t_ids)
         theme_df.to_csv(out_theme_csv, index=False)
 
+        print(f"[model] version={MODEL_VERSION}")
         print(f"[write] {out_user_csv}  (users={len(user_df)})")
         print(f"[write] {out_theme_csv} (themes={len(theme_df)})")
 

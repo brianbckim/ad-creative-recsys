@@ -152,6 +152,16 @@ That metadata is used to prevent accidental misuse across runs (e.g., mismatch o
 - Trains a DIN student model to re-rank Two-Tower candidates.
 - The training signal is dominated by **teacher slates** (`tt_candidates_topK.jsonl`) and optionally strengthened by “where positives are” information.
 
+### User representation and candidate attention
+
+The student uses an industrial hybrid profile instead of exporting an unused user table:
+- a learned user-ID embedding provides a stable long-term/cold-history signal,
+- scaled target-aware attention summarizes positive behavior history for the current item,
+- a learned gate fuses the static and behavioral representations,
+- every candidate in a listwise slate receives its own target-aware history vector.
+
+The matching MLP consumes `[user_context, item, user_context-item, user_context*item]`. The graph asserts that `user_emb_w` is connected to the loss, while the trainer records gradient norm and actual weight movement.
+
 ### Inputs
 
 Required:
@@ -213,6 +223,8 @@ python din/train_listwise_kd.py \
 	--tau 1.5 \
 	--lambda_kd 0.7 \
 	--lr 5e-4 \
+	--eval_k 10,20 \
+	--checkpoint_metric student_ndcg \
 	--seed 42
 ```
 
@@ -221,20 +233,19 @@ Notes:
 - The trainer pads/truncates candidates to exactly `K`.
 - It also forces the current training target item to appear in the slate (injects it into the last position if needed), so every example is “about a target in-slate”.
 
-### Checkpointing behavior (important)
+### Validation and checkpointing behavior
 
-This script does **not** run a validation loop.
+After every epoch the trainer evaluates teacher and student orders on the same held-out candidate slates. It reports:
+- teacher/student `Recall@K` and `NDCG@K`,
+- `delta_ndcg@K = student_ndcg@K - teacher_ndcg@K`,
+- number of evaluable held-out users,
+- `user_grad_norm` and `user_emb_delta`.
 
-Instead, it saves the “best” checkpoint purely by **training average total loss**:
-- After each epoch it prints `[epoch X] total_loss=...`.
-- If the epoch average total loss is lower than the current best, it saves:
-	- `$OUT_DIR/din_kd_best.ckpt` (TF checkpoint prefix)
+By default, `$OUT_DIR/din_kd_best.ckpt` is selected by student NDCG at the first cutoff in `--eval_k`. Use `--checkpoint_metric total_loss` only for a deliberate compatibility or ablation run. All epoch metrics are written to `$OUT_DIR/metrics.jsonl`.
 
-This is fine for:
-- deterministic reproduction and pipeline continuity, and
-- monitoring whether training is behaving sensibly,
+`$OUT_DIR/run_config.json` records the architecture version (`hybrid-din-v2`), arguments, and dataset/candidate cardinalities. Warm-start checks this metadata when it is available; checkpoints from the previous disconnected-user architecture should be retrained rather than reused.
 
-but it is not a guarantee of best generalization.
+If no held-out user is covered by the candidate file, the trainer warns and temporarily falls back to training loss for checkpoint selection. That condition should normally be treated as a candidate-coverage problem to fix.
 
 ## 6.3 Metrics & Monitoring
 
@@ -262,7 +273,8 @@ Suggested practice:
 The KD trainer prints:
 - counts (`users_with_candidates`, `item_count`, `cate_count`, `theme_count`)
 - whether positives came from `proxy_jsonl` or `dataset.pkl`
-- per-epoch `total_loss`
+- per-epoch `total_loss`, teacher/student Recall/NDCG, and NDCG lift
+- user embedding gradient norm and actual update magnitude
 - checkpoint save messages
 
 Practical checks when `total_loss` looks wrong:
@@ -274,6 +286,8 @@ Practical checks when `total_loss` looks wrong:
 	- `--tau` (temperature)
 	- `--lambda_kd` (KD vs CE balance)
 	- `--point_loss_weight` (how much original pointwise loss to keep)
+- If `user_grad_norm` or `user_emb_delta` is zero, stop the run; the exported user table would not be trustworthy.
+- If `delta_ndcg@K` is consistently negative, the student is degrading the teacher order even if training loss decreases.
 
 ### Cross-stage monitoring (recommended minimal checklist)
 
@@ -281,7 +295,6 @@ For each tag, you should be able to answer these quickly from artifacts:
 - Proxy: Are label rates and basic stats stable across tags?
 - Two-Tower: Does validation AUC/Recall/NDCG look reasonable and stable?
 - Teacher slate: Does `tt_candidates_topK.jsonl` have the expected number of users and `k`?
-- DIN KD: Does `total_loss` decrease across epochs and produce a checkpoint?
+- DIN KD: Does `total_loss` remain stable, does user embedding update, and does student NDCG improve over the teacher order?
 
 This pipeline is designed so that if one stage looks off, you can usually pinpoint it by checking a small number of files under `runs/<tag>/` rather than re-running the entire system.
-

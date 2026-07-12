@@ -12,8 +12,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from input import DataInput
-from model import Model
+try:
+    from .input import DataInput
+    from .model import MODEL_VERSION, Model
+except ImportError:
+    from input import DataInput
+    from model import MODEL_VERSION, Model
 
 
 def read_map_csv(path: Path, key_col: str, idx_col: str):
@@ -21,6 +25,17 @@ def read_map_csv(path: Path, key_col: str, idx_col: str):
     if key_col not in df.columns or idx_col not in df.columns:
         raise ValueError(f"{path} must have columns '{key_col}','{idx_col}'")
     return dict(zip(df[key_col].astype(str), df[idx_col].astype(int)))
+
+
+def checkpoint_exists(path: Path) -> bool:
+    return path.exists() or Path(str(path) + ".index").exists()
+
+
+def _jsonable_args(args):
+    out = {}
+    for key, value in vars(args).items():
+        out[key] = str(value) if isinstance(value, Path) else value
+    return out
 
 
 def _read_meta_after_cate(f, cate_list_len: int):
@@ -177,6 +192,127 @@ def make_batches(batch_users, batch_targets, cands, pos_map, fallback, K, tau):
     return cand_ids, teacher_s, y_list, label_mask
 
 
+def _ranking_metrics_for_order(candidate_ids, ordered_positions, positives, ks):
+    candidate_ids = np.asarray(candidate_ids, dtype=np.int64)
+    ordered_positions = np.asarray(ordered_positions, dtype=np.int64)
+    positives = set(int(x) for x in positives)
+    ordered_ids = candidate_ids[ordered_positions]
+    out = {}
+
+    for k in ks:
+        top_ids = ordered_ids[: min(int(k), len(ordered_ids))]
+        relevance = np.asarray(
+            [1.0 if int(iid) in positives else 0.0 for iid in top_ids],
+            dtype=np.float64,
+        )
+        recall = float(relevance.sum() / max(1, len(positives)))
+        discounts = 1.0 / np.log2(np.arange(2, 2 + len(relevance)))
+        dcg = float(np.sum(relevance * discounts))
+        ideal_len = min(len(positives), int(k))
+        ideal_dcg = float(np.sum(1.0 / np.log2(np.arange(2, 2 + ideal_len))))
+        out[f"recall@{k}"] = recall
+        out[f"ndcg@{k}"] = dcg / ideal_dcg if ideal_dcg > 0 else 0.0
+
+    return out
+
+
+def evaluate_teacher_and_student(sess, model, test_set, cands, K, ks, batch_size):
+    """Evaluate retrieval and re-ranking on the same held-out candidate slates."""
+    rows = []
+    for row in test_set:
+        if len(row) != 3:
+            continue
+        uid, hist, pair = row
+        if not isinstance(pair, (list, tuple)) or len(pair) < 1:
+            continue
+        uid = int(uid)
+        ids_scores = cands.get(uid)
+        if ids_scores is None:
+            continue
+        ids, teacher_scores = ids_scores
+        ids = list(ids[:K])
+        teacher_scores = list(teacher_scores[:K])
+        if not ids:
+            continue
+        rows.append((
+            uid,
+            [int(x) for x in hist],
+            {int(pair[0])},
+            ids,
+            teacher_scores,
+        ))
+
+    if not rows:
+        return {"eval_examples": 0, "eval_users": 0}
+
+    aggregates = {
+        f"{prefix}_{metric}@{k}": []
+        for prefix in ("teacher", "student")
+        for metric in ("recall", "ndcg")
+        for k in ks
+    }
+
+    for start in range(0, len(rows), batch_size):
+        batch = rows[start : start + batch_size]
+        max_hist = max(1, max(len(row[1]) for row in batch))
+        max_cands = max(len(row[3]) for row in batch)
+
+        user_ids = np.asarray([row[0] for row in batch], dtype=np.int32)
+        histories = np.zeros((len(batch), max_hist), dtype=np.int32)
+        history_lengths = np.zeros((len(batch),), dtype=np.int32)
+        candidate_ids = np.zeros((len(batch), max_cands), dtype=np.int32)
+
+        for b, (_, hist, _, ids, _) in enumerate(batch):
+            history_lengths[b] = len(hist)
+            if hist:
+                histories[b, : len(hist)] = np.asarray(hist, dtype=np.int32)
+            candidate_ids[b, : len(ids)] = np.asarray(ids, dtype=np.int32)
+            if len(ids) < max_cands:
+                candidate_ids[b, len(ids) :] = int(ids[-1])
+
+        student_logits = sess.run(
+            model.logits_sub_raw,
+            feed_dict={
+                model.u: user_ids,
+                model.hist_i: histories,
+                model.sl: history_lengths,
+                model.cand_ids: candidate_ids,
+                model.use_cand_ids: True,
+                model.is_training: False,
+            },
+        )
+
+        for b, (_, _, positives, ids, teacher_scores) in enumerate(batch):
+            n = len(ids)
+            teacher_order = np.argsort(-np.asarray(teacher_scores, dtype=np.float64))
+            student_order = np.argsort(-np.asarray(student_logits[b, :n], dtype=np.float64))
+            teacher_metrics = _ranking_metrics_for_order(
+                ids, teacher_order, positives, ks
+            )
+            student_metrics = _ranking_metrics_for_order(
+                ids, student_order, positives, ks
+            )
+            for k in ks:
+                for metric in ("recall", "ndcg"):
+                    aggregates[f"teacher_{metric}@{k}"].append(
+                        teacher_metrics[f"{metric}@{k}"]
+                    )
+                    aggregates[f"student_{metric}@{k}"].append(
+                        student_metrics[f"{metric}@{k}"]
+                    )
+
+    out = {
+        "eval_examples": len(rows),
+        "eval_users": len({int(row[0]) for row in rows}),
+    }
+    out.update({key: float(np.mean(values)) for key, values in aggregates.items()})
+    for k in ks:
+        out[f"delta_ndcg@{k}"] = (
+            out[f"student_ndcg@{k}"] - out[f"teacher_ndcg@{k}"]
+        )
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset_pkl", type=Path, required=True)
@@ -194,6 +330,11 @@ def main():
     ap.add_argument("--lr", type=float, default=5e-4)
     ap.add_argument("--point_loss_weight", type=float, default=1.0,
                     help="Weight for original pointwise BCE loss (>=0)")
+    ap.add_argument("--eval_k", default="10,20",
+                    help="Comma-separated held-out ranking cutoffs")
+    ap.add_argument("--checkpoint_metric", choices=["student_ndcg", "total_loss"],
+                    default="student_ndcg",
+                    help="Select checkpoints by held-out student NDCG or training loss")
     ap.add_argument("--seed", type=int, default=42,
                     help="Global seed for reproducible shuffling/initialization")
     args = ap.parse_args()
@@ -223,6 +364,39 @@ def main():
     if not users:
         raise RuntimeError("No users in candidates after filtering. Check tt_candidates_topK.jsonl and maps.")
     print(f"[info] users_with_candidates={len(users)} item_count={item_count} cate_count={cate_count} theme_count={theme_count}")
+
+    if args.ckpt_in and checkpoint_exists(args.ckpt_in):
+        prior_config_path = args.ckpt_in.parent / "run_config.json"
+        if prior_config_path.exists():
+            prior_checkpoint_config = json.loads(
+                prior_config_path.read_text(encoding="utf-8")
+            )
+            prior_version = prior_checkpoint_config.get("model_version")
+            if prior_version and prior_version != MODEL_VERSION:
+                raise RuntimeError(
+                    f"Checkpoint model_version={prior_version}, expected {MODEL_VERSION}"
+                )
+        else:
+            print(
+                "[warn] ckpt_in has no run_config.json; architecture compatibility "
+                "cannot be verified"
+            )
+
+    run_config = {
+        "model_version": MODEL_VERSION,
+        "args": _jsonable_args(args),
+        "counts": {
+            "users": user_count,
+            "items": item_count,
+            "categories": cate_count,
+            "themes": theme_count,
+            "train_examples": len(train_set),
+            "test_examples": len(test_set),
+            "users_with_candidates": len(users),
+        },
+    }
+    with open(args.out_dir / "run_config.json", "w", encoding="utf-8") as f:
+        json.dump(run_config, f, indent=2)
 
     if args.proxy_jsonl and args.proxy_jsonl.exists():
         pos_map = load_positives_from_proxy(args.proxy_jsonl, user2idx, item2idx, user_count, item_count)
@@ -267,15 +441,19 @@ def main():
         kd_mix = args.lambda_kd * kd_loss + (1.0 - args.lambda_kd) * ce_masked
         total_loss = kd_mix + tf.constant(float(args.point_loss_weight), dtype=tf.float32) * model.loss
 
-        sess.run(tf.global_variables_initializer())
+        user_grad = tf.gradients(total_loss, model.user_emb_w)[0]
+        if user_grad is None:
+            raise RuntimeError("user_emb_w is disconnected from the total DIN KD loss")
+        user_grad_values = user_grad.values if isinstance(user_grad, tf.IndexedSlices) else user_grad
+        user_grad_norm = tf.norm(user_grad_values)
 
-        restore_vars = [v for v in tf.global_variables() if "Adam" not in v.name and "beta" not in v.name]
+        restore_vars = [
+            v for v in tf.global_variables()
+            if "/Adam" not in v.name
+            and "beta1_power" not in v.name
+            and "beta2_power" not in v.name
+        ]
         saver_restore = tf.train.Saver(var_list=restore_vars)
-        if args.ckpt_in and args.ckpt_in.exists():
-            saver_restore.restore(sess, str(args.ckpt_in))
-            print(f"[load] restored weights from {args.ckpt_in}")
-        else:
-            print("[load] no ckpt_in provided -> training from scratch")
 
         opt = tf.train.AdamOptimizer(learning_rate=args.lr)
         train_vars = tf.trainable_variables()
@@ -283,14 +461,31 @@ def main():
         with tf.control_dependencies(update_ops):
             train_op = opt.minimize(total_loss, var_list=train_vars)
 
-        new_vars = [v for v in tf.global_variables() if v not in restore_vars]
-        if new_vars:
-            sess.run(tf.variables_initializer(new_vars))
-
         saver = tf.train.Saver(max_to_keep=3)
+        sess.run(tf.global_variables_initializer())
 
-        steps_per_epoch = (len(users) + args.batch_size - 1) // args.batch_size
-        best_loss = float("inf")
+        if args.ckpt_in and checkpoint_exists(args.ckpt_in):
+            saver_restore.restore(sess, str(args.ckpt_in))
+            print(f"[load] restored weights from {args.ckpt_in}")
+        else:
+            print("[load] no ckpt_in provided -> training from scratch")
+
+        eval_ks = tuple(sorted({int(k) for k in args.eval_k.split(",") if k.strip()}))
+        if not eval_ks:
+            raise ValueError("--eval_k must contain at least one positive integer")
+        if any(k <= 0 for k in eval_ks):
+            raise ValueError("--eval_k values must be positive")
+
+        best_value = -float("inf") if args.checkpoint_metric == "student_ndcg" else float("inf")
+        metrics_path = args.out_dir / "metrics.jsonl"
+        metrics_path.write_text("", encoding="utf-8")
+
+        audit_ids = sorted({int(row[0]) for row in train_set})[:1024]
+        audit_tensor = tf.gather(
+            model.user_emb_w,
+            tf.constant(audit_ids, dtype=tf.int32),
+        )
+        audit_before = sess.run(audit_tensor)
 
         if cands:
             sample_ids, sample_scores = next(iter(cands.values()))
@@ -301,6 +496,7 @@ def main():
         for ep in range(1, args.epochs + 1):
             random.shuffle(train_set)
             run_loss = 0.0
+            run_user_grad_norm = 0.0
             batches = 0
 
             batch_iter = DataInput(train_set, args.batch_size)
@@ -328,18 +524,85 @@ def main():
                     label_mask: lm,
                 }
 
-                loss_val, _ = sess.run([total_loss, train_op], feed_dict=feed)
+                loss_val, grad_norm_val, _ = sess.run(
+                    [total_loss, user_grad_norm, train_op], feed_dict=feed
+                )
                 run_loss += float(loss_val)
+                run_user_grad_norm += float(grad_norm_val)
                 batches += 1
 
             avg = run_loss / max(1, batches)
-            print(f"[epoch {ep}] total_loss={avg:.6f}")
+            avg_user_grad_norm = run_user_grad_norm / max(1, batches)
+            audit_after = sess.run(audit_tensor)
+            user_emb_delta = float(np.mean(np.abs(audit_after - audit_before)))
+            audit_before = audit_after
 
-            if avg < best_loss:
-                best_loss = avg
+            rank_metrics = evaluate_teacher_and_student(
+                sess,
+                model,
+                test_set,
+                cands,
+                K=args.K,
+                ks=eval_ks,
+                batch_size=args.batch_size,
+            )
+
+            metric_parts = []
+            for k in eval_ks:
+                metric_parts.append(
+                    f"student_ndcg@{k}="
+                    f"{rank_metrics.get(f'student_ndcg@{k}', float('nan')):.6f}"
+                )
+                metric_parts.append(
+                    f"delta_ndcg@{k}="
+                    f"{rank_metrics.get(f'delta_ndcg@{k}', float('nan')):.6f}"
+                )
+            metric_text = " ".join(metric_parts)
+            print(
+                f"[epoch {ep}] total_loss={avg:.6f} "
+                f"user_grad_norm={avg_user_grad_norm:.6f} "
+                f"user_emb_delta={user_emb_delta:.8f} "
+                f"eval_users={rank_metrics.get('eval_users', 0)} {metric_text}"
+            )
+
+            row = {
+                "epoch": ep,
+                "total_loss": avg,
+                "user_grad_norm": avg_user_grad_norm,
+                "user_emb_delta": user_emb_delta,
+                **rank_metrics,
+            }
+            with open(metrics_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+
+            if user_emb_delta <= 1e-12:
+                raise RuntimeError(
+                    "user_emb_w did not update; aborting to avoid exporting random user embeddings"
+                )
+
+            if args.checkpoint_metric == "student_ndcg":
+                metric_key = f"student_ndcg@{eval_ks[0]}"
+                current_value = rank_metrics.get(metric_key, float("nan"))
+                if not np.isfinite(current_value):
+                    print(
+                        f"[warn] {metric_key} unavailable; falling back to minimum total_loss"
+                    )
+                    current_value = -avg
+                improved = current_value > best_value
+            else:
+                current_value = avg
+                improved = current_value < best_value
+
+            if improved:
+                best_value = current_value
                 out_ckpt = str(args.out_dir / "din_kd_best.ckpt")
                 saver.save(sess, out_ckpt)
-                print(f"[save] {out_ckpt}  (best_loss={best_loss:.6f})")
+                print(
+                    f"[save] {out_ckpt} "
+                    f"({args.checkpoint_metric}={best_value:.6f})"
+                )
+
+        print(f"[metrics] wrote: {metrics_path}")
 
 
 if __name__ == "__main__":

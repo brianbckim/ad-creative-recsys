@@ -156,6 +156,18 @@ What to do
 - Ensure `--user_map` and `--item_map` come from the same `$RUN_DIR/twotower_data/` as the JSONL you’re using.
 - If you care about chronological histories, prefer the JSONL path that includes timestamps.
 	- Pair CSVs (`twotower_*_pairs.csv`) contain only `(user_idx,item_idx,label)` by default, so they cannot reconstruct real time order.
+- Confirm that validation histories contain training positives for the same user and that `--max_history_len` is appropriate for your traffic pattern.
+
+### DIN aborts because `user_emb_w` did not update
+
+What is happening
+- The trainer enforces that exported user embeddings receive a non-zero gradient and change during training.
+- An abort usually indicates a disconnected model path, an empty training set, or a degenerate learning configuration.
+
+What to do
+- Inspect `user_grad_norm` and `user_emb_delta` in the epoch log and `metrics.jsonl`.
+- Confirm that user IDs are in range, batches are non-empty, and the learning rate is positive.
+- Do not bypass this guard and export the table: that would reintroduce random, untrained user features downstream.
 
 ### `din/train_listwise_kd.py` errors about candidates/users
 
@@ -293,4 +305,3 @@ When updating the copy catalog
 	- the TF‑IDF feature space coverage changed
 	- the copy embedding table changed size/order
 - Operationally: regenerate `copy_embeddings.csv` and ensure `copy_id` remains a stable dense index (or keep a stable remapping layer).
-

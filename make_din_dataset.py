@@ -117,14 +117,35 @@ def split_by_user_chrono(rows, test_ratio=0.1, seed=42):
         train += lst[:-k] if n > k else lst
     return train, test
 
-def build_histories(examples):
-    by_user = {}
+def build_histories(examples, initial_histories=None, positive_only=True,
+                    max_history_len=50):
+    by_user = {
+        int(uid): [int(iid) for iid in items]
+        for uid, items in (initial_histories or {}).items()
+    }
     out = []
     for uid, iid, lab, ts in examples:
-        hist = [x[1] for x in by_user.get(uid, [])]
+        uid = int(uid)
+        iid = int(iid)
+        hist = list(by_user.get(uid, []))[-int(max_history_len):]
         out.append((uid, hist, iid, lab, ts))
-        by_user.setdefault(uid, []).append((uid, iid, ts))
+        if (not positive_only) or int(lab) == 1:
+            by_user.setdefault(uid, []).append(iid)
+            if len(by_user[uid]) > int(max_history_len):
+                by_user[uid] = by_user[uid][-int(max_history_len):]
     return out
+
+
+def collect_histories(examples, positive_only=True, max_history_len=50):
+    by_user = {}
+    for uid, iid, lab, _ in examples:
+        if positive_only and int(lab) != 1:
+            continue
+        uid = int(uid)
+        by_user.setdefault(uid, []).append(int(iid))
+        if len(by_user[uid]) > int(max_history_len):
+            by_user[uid] = by_user[uid][-int(max_history_len):]
+    return by_user
 
 def sample_neg(n_items: int, forbid: set, rng: random.Random) -> int:
     if n_items <= len(forbid):
@@ -177,9 +198,16 @@ def main():
 
     ap.add_argument("--out",          default="./din/dataset.pkl")
     ap.add_argument("--test_ratio",   type=float, default=0.1)
+    ap.add_argument("--max_history_len", type=int, default=50,
+                    help="Maximum positive behavior history length per example")
+    ap.add_argument("--include_nonpositive_history", action="store_true",
+                    help="Include label=0 events in behavior history (not recommended)")
     ap.add_argument("--format",       choices=["legacy","std"], default="legacy",
                     help="legacy=(train: (u,h,t,l), test: (u,h,[pos,neg])); std=DIN 6-tuple")
     args = ap.parse_args()
+
+    if args.max_history_len <= 0:
+        raise SystemExit("--max_history_len must be > 0")
 
     user_id2idx, n_users = read_map_csv(args.user_map, "user_id", "user_idx")
     item_id2idx, n_items = read_map_csv(args.item_map, "item_id", "item_idx")
@@ -205,8 +233,23 @@ def main():
     else:
         raise SystemExit("Please provide one of: --pairs_csv_train+--pairs_csv_val  OR  --pairs_csv  OR  --proxy_jsonl")
 
-    tr_hist = build_histories(train_rows)
-    te_hist = build_histories(val_rows)
+    positive_only = not args.include_nonpositive_history
+    tr_hist = build_histories(
+        train_rows,
+        positive_only=positive_only,
+        max_history_len=args.max_history_len,
+    )
+    train_history_seed = collect_histories(
+        train_rows,
+        positive_only=positive_only,
+        max_history_len=args.max_history_len,
+    )
+    te_hist = build_histories(
+        val_rows,
+        initial_histories=train_history_seed,
+        positive_only=positive_only,
+        max_history_len=args.max_history_len,
+    )
 
     if args.format == "legacy":
         train_set = to_legacy_train_samples(tr_hist)

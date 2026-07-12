@@ -32,15 +32,12 @@ Important detail: the TensorFlow dependency is selected using environment marker
 
 This matters because the DIN stage is implemented in TF1-style graph/session mode (see `din/train_listwise_kd.py` using `tf.compat.v1` and `tf.disable_v2_behavior()`).
 
-In the current code, DIN also relies on legacy `tf.layers.*` APIs (e.g., `tf.layers.batch_normalization`). That means:
-
-- A plain “install `requirements.txt` and run everything in one environment” setup may fail for the DIN stage if your TensorFlow/Keras combination does not support `tf.layers.*` (notably, standalone Keras 3 environments).
-- To run DIN reliably, you need an environment where those legacy APIs are available (for example, a TF1/Keras2-style environment, or a TF2 setup that still exposes the legacy v1 layers).
+The DIN graph now uses `tf.keras.layers` objects that are compatible with Keras 3 while preserving `tf.compat.v1` graph/session execution. It no longer depends on removed `tf.layers.*` symbols.
 
 ### 4.1.2 Recommended setup (single environment)
 The simplest operational setup is one Python environment that can import both torch and tensorflow.
 
-However, because the DIN stage is TF1-style graph code and uses legacy `tf.layers.*`, a single environment only works if your TensorFlow/Keras build supports those APIs. If it doesn’t, run DIN in a separate, compatible environment (see next section).
+The checked dependency combination in `requirements.txt` supports the current graph. Separate environments remain optional for operational isolation, not a requirement for legacy `tf.layers` compatibility.
 
 Example (venv):
 
@@ -177,9 +174,11 @@ All top-level scripts use `argparse`. The most reliable workflow is:
 - key training knobs:
 	- `--K` (candidate slate size), `--tau` (softmax temperature for KD distribution)
 	- `--lambda_kd` (KD vs CE mix), `--point_loss_weight` (how much original pointwise DIN loss matters)
+	- `--eval_k` controls held-out Recall/NDCG cutoffs; `--checkpoint_metric` defaults to `student_ndcg`
 - output:
 	- `--out_dir` (default `./din_kd_runs`)
-	- saves `din_kd_best.ckpt` when training total loss improves
+	- saves `din_kd_best.ckpt` when the configured checkpoint metric improves and writes `metrics.jsonl`
+	- writes `run_config.json` with model version, effective arguments, and cardinalities
 
 **DIN embedding export (`din/export_user_theme_embeddings.py`)**
 - `--ckpt`: checkpoint path
@@ -265,4 +264,3 @@ Given the proxy nature of labels and the dense-index joins, provenance should an
 - Which embedding tables (and artifact prefixes) were used to build copy-head samples and rankings?
 
 If you can answer those questions for a run, you can usually reproduce results or diagnose why a run diverged.
-
